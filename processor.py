@@ -18,6 +18,7 @@ class DataProcessor:
         self.cancelado = False
         self.callback_progreso = None
         self.callback_completado = None
+        self.callback_correccion_tipos = None  # Para ventana gráfica de corrección
         
         # Patrones para detectar columnas de fecha
         self.fecha_patterns = [
@@ -152,8 +153,12 @@ class DataProcessor:
         except Exception as e:
             raise Exception(f"Error al cargar vista previa: {str(e)}")
     
-    def procesar_archivo(self, archivo, bd_destino, nombre_tabla, callback_progreso, callback_completado):
-        """Procesa el archivo completo y lo carga a SQLite con formato normalizado"""
+    def procesar_archivo(self, archivo, bd_destino, nombre_tabla, callback_progreso, callback_completado, correccion_modo=None):
+        """Procesa el archivo completo y lo carga a SQLite con formato normalizado
+        
+        Args:
+            correccion_modo: None/False=automático, "grafica"=ventana gráfica, "consola"=por consola
+        """
         self.cancelado = False
         self.callback_progreso = callback_progreso
         self.callback_completado = callback_completado
@@ -192,12 +197,59 @@ class DataProcessor:
                 conn.close()
                 return
             
+            # NUEVO: Corrección de tipos gráfica
+            if correccion_modo == "grafica":
+                self.callback_progreso(0.35, "🎨 Preparando corrección gráfica de tipos...")
+                
+                # Generar esquema inicial para corrección
+                esquema_inicial = self.obtener_esquema_tabla(df_original)
+                
+                # Importar y abrir ventana de corrección
+                try:
+                    from correccion_tipos import VentanaCorreccionTipos
+                    
+                    # Variable para resultado
+                    resultado_correccion = {'completado': False, 'esquema': esquema_inicial}
+                    
+                    def callback_correccion(aplicar_cambios, esquema_resultado):
+                        resultado_correccion['completado'] = True
+                        resultado_correccion['aplicar_cambios'] = aplicar_cambios
+                        resultado_correccion['esquema'] = esquema_resultado
+                    
+                    # Abrir ventana (esto debe ejecutarse en el hilo principal)
+                    # La ventana se abrirá usando el callback configurado desde interface.py
+                    if hasattr(self, 'callback_correccion_tipos') and self.callback_correccion_tipos:
+                        self.callback_correccion_tipos(df_original, esquema_inicial, callback_correccion)
+                        
+                        # Esperar resultado (simplificado)
+                        import time
+                        timeout = 300  # 5 minutos máximo
+                        elapsed = 0
+                        while not resultado_correccion['completado'] and elapsed < timeout:
+                            time.sleep(0.1)
+                            elapsed += 0.1
+                            if self.cancelado:
+                                conn.close()
+                                return
+                        
+                        # Usar esquema corregido si se aplicaron cambios
+                        if resultado_correccion.get('aplicar_cambios', False):
+                            esquema_personalizado = resultado_correccion['esquema']
+                        else:
+                            esquema_personalizado = esquema_inicial
+                    else:
+                        esquema_personalizado = self.obtener_esquema_tabla(df_original)
+                        
+                except ImportError:
+                    print("⚠️ No se pudo cargar ventana gráfica, usando esquema automático")
+                    esquema_personalizado = self.obtener_esquema_tabla(df_original)
+            else:
+                esquema_personalizado = self.obtener_esquema_tabla(df_original)
+
             self.callback_progreso(0.4, "📋 Creando esquema de tabla...")
             
-            # Generar esquema
-            esquema = self.obtener_esquema_tabla(df_original)
-            
-            # Crear tabla con esquema apropiado
+            # Crear tabla con esquema apropiado (usar esquema personalizado si existe)
+            esquema = esquema_personalizado
             sql_create = f"CREATE TABLE IF NOT EXISTS {nombre_tabla} (\n"
             columnas_sql = []
             for col_limpio, info in esquema.items():

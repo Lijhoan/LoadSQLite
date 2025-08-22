@@ -1,7 +1,7 @@
 # interface.py
 """
 🎨 INTERFAZ DE USUARIO ETL
-Ventana principal con control dinámico de expansión y corrección gráfica de tipos
+Ventana principal con control dinámico de expansión
 """
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, ttk
@@ -23,8 +23,22 @@ class ETLInterface(ctk.CTk):
         # Variables de estado
         self.processor = DataProcessor()
         self.archivo_actual = None
-        self.cargando = False
-        self.preview_expandida = False  # Control de expansión
+        self.cargan        # NUEVO: Preguntar si quiere corrección de tipos con interfaz gráfica
+        respuesta = messagebox.askyesno(
+            "Corrección de Tipos de Datos", 
+            "¿Deseas revisar y corregir los tipos de datos?\n\n"
+            "✅ SÍ: Se abrirá ventana gráfica para revisar TODAS las columnas\n"
+            "❌ NO: Usar tipos detectados automáticamente\n\n"
+            "🔍 La ventana gráfica te permitirá:\n"
+            "• Ver todas las columnas y sus tipos detectados\n"
+            "• Cambiar tipos con listas desplegables\n"
+            "• Ver problemas detectados automáticamente\n"
+            "• Aplicar correcciones antes de cargar a SQLite\n\n"
+            "💡 RECOMENDADO: SÍ (control total sobre tipos de datos)"
+        )
+
+        # Solo dos opciones: interfaz gráfica o automático
+        correccion_modo = "grafica" if respuesta else False   self.preview_expandida = False  # Control de expansión
         
         # Crear interfaz con scroll
         self.crear_interfaz_con_scroll()
@@ -717,25 +731,23 @@ class ETLInterface(ctk.CTk):
         self.progreso.set(0)
         self.lbl_estado.configure(text="Iniciando carga...")
         
-        # NUEVO: Preguntar si quiere corrección gráfica de tipos
-        respuesta = messagebox.askyesno(
+        # NUEVO: Preguntar si quiere corrección interactiva con opciones
+        respuesta = messagebox.askyesnocancel(
             "Corrección de Tipos de Datos", 
-            "¿Deseas revisar y corregir los tipos de datos?\n\n"
-            "✅ SÍ: Se abrirá ventana gráfica para revisar TODAS las columnas\n"
-            "❌ NO: Usar tipos detectados automáticamente\n\n"
-            "🔍 La ventana gráfica te permitirá:\n"
-            "• Ver todas las columnas y sus tipos detectados\n"
-            "• Cambiar tipos con listas desplegables\n"
-            "• Ver problemas detectados automáticamente\n"
-            "• Aplicar correcciones antes de cargar a SQLite\n\n"
-            "💡 RECOMENDADO: SÍ (control total sobre tipos de datos)"
+            "¿Cómo deseas revisar los tipos de datos?\n\n"
+            "✅ SÍ: Interfaz gráfica con listas desplegables\n"
+            "❌ NO: Usar tipos detectados automáticamente\n" 
+            "� CANCELAR: Usar corrección por consola\n\n"
+            "💡 RECOMENDADO: SÍ (interfaz gráfica más fácil de usar)"
         )
 
-        # Solo dos opciones: interfaz gráfica o automático
-        correccion_modo = "grafica" if respuesta else False
-        
-        # IMPORTANTE: Configurar callback para ventana gráfica
-        self.processor.callback_correccion_tipos = self.abrir_ventana_correccion_tipos
+        # Convertir respuesta a parámetro
+        if respuesta is True:
+            correccion_modo = "grafica"  # Interfaz gráfica
+        elif respuesta is False:
+            correccion_modo = False  # Sin corrección
+        else:  # None (Cancelar)
+            correccion_modo = "consola"  # Consola
         
         thread = threading.Thread(
             target=self.processor.procesar_archivo,
@@ -745,7 +757,7 @@ class ETLInterface(ctk.CTk):
                 tabla, 
                 self.callback_progreso, 
                 self.callback_completado,
-                correccion_modo  # ← Puede ser "grafica" o False
+                correccion_modo  # ← Puede ser "grafica", False, o "consola"
             )
         )
         thread.daemon = True
@@ -852,11 +864,3 @@ class ETLInterface(ctk.CTk):
         except ImportError as e:
             messagebox.showerror("Error", f"No se pudo cargar la ventana de corrección:\n{str(e)}")
             callback(False, esquema_inicial)
-
-def main():
-    """Función principal"""
-    app = ETLInterface()
-    app.mainloop()
-
-if __name__ == "__main__":
-    main()
