@@ -16,6 +16,7 @@ __pycache__/
 *.db
 *.sqlite
 *.sqlite3
+datos.db
 
 # Archivos de sistema
 .DS_Store
