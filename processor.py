@@ -137,6 +137,179 @@ class DataProcessor:
         
         return esquema
     
+    def detectar_problemas_tipos(self, df, esquema):
+        """Detecta problemas potenciales en los tipos de datos detectados automáticamente"""
+        problemas = []
+        
+        for col_limpio, info in esquema.items():
+            col_original = info['columna_original']
+            tipo_detectado = info['tipo']
+            
+            # Obtener muestra de datos sin nulos
+            muestra = df[col_original].dropna()
+            if len(muestra) == 0:
+                continue
+            
+            # PROBLEMA 1: Números grandes interpretados como texto
+            if tipo_detectado == 'TEXT':
+                # Verificar si contiene números que podrían ser enteros
+                muestra_str = muestra.astype(str)
+                numeros_detectados = 0
+                for valor in muestra_str.head(20):  # Revisar primeros 20
+                    if valor.replace('.', '').replace('-', '').isdigit():
+                        numeros_detectados += 1
+                
+                if numeros_detectados > len(muestra_str.head(20)) * 0.7:  # 70% son números
+                    problemas.append({
+                        'columna': col_original,
+                        'problema': 'Números detectados como TEXT - posible INTEGER/REAL',
+                        'sugerencia': 'INTEGER',  # Cambié tipo_sugerido por sugerencia
+                        'categoria': 'numeros_como_texto'
+                    })
+            
+            # PROBLEMA 2: Fechas no detectadas (campos de texto que parecen fechas)
+            if tipo_detectado == 'TEXT' and not info['es_fecha']:
+                # Buscar patrones de fecha en el nombre de columna
+                col_lower = col_original.lower()
+                if any(patron in col_lower for patron in ['fecha', 'date', 'time', 'created', 'updated']):
+                    problemas.append({
+                        'columna': col_original,
+                        'problema': 'Posible fecha no detectada - revisar formato',
+                        'sugerencia': 'DATE',  # Cambié tipo_sugerido por sugerencia
+                        'categoria': 'fecha_no_detectada'
+                    })
+            
+            # PROBLEMA 3: Campos mixtos (enteros y decimales mezclados)
+            if tipo_detectado == 'REAL':
+                # Verificar si todos los valores son enteros
+                valores_enteros = 0
+                for valor in muestra.head(20):
+                    if pd.notna(valor) and float(valor).is_integer():
+                        valores_enteros += 1
+                
+                if valores_enteros == len(muestra.head(20)):
+                    problemas.append({
+                        'columna': col_original,
+                        'problema': 'Todos los valores son enteros - considerar INTEGER',
+                        'sugerencia': 'INTEGER',  # Cambié tipo_sugerido por sugerencia
+                        'categoria': 'real_podria_ser_integer'
+                    })
+            
+            # PROBLEMA 4: Campos que podrían ser BOOLEAN
+            if tipo_detectado in ['TEXT', 'INTEGER']:
+                valores_unicos = set(muestra.astype(str).str.lower().unique()[:10])
+                if valores_unicos.issubset({'0', '1', 'true', 'false', 'yes', 'no', 'si', 'no', 't', 'f'}):
+                    problemas.append({
+                        'columna': col_original,
+                        'problema': 'Valores binarios detectados - considerar BOOLEAN',
+                        'sugerencia': 'BOOLEAN',  # Cambié tipo_sugerido por sugerencia
+                        'categoria': 'posible_boolean'
+                    })
+        
+        return problemas
+    
+    def _continuar_despues_correccion(self, aplicar_cambios, esquema_resultado):
+        """Continúa el procesamiento después de que el usuario termine la corrección de tipos"""
+        try:
+            # Recuperar datos guardados
+            datos = self._datos_pendientes
+            df_original = datos['df_original']
+            df_final = datos['df_final']
+            bd_destino = datos['bd_destino']
+            nombre_tabla = datos['nombre_tabla']
+            # NO usar la conexión anterior - crear nueva en este hilo
+            esquema_inicial = datos['esquema_inicial']
+            
+            # CRÍTICO: Cerrar conexión anterior y crear nueva en este hilo
+            try:
+                datos['conn'].close()
+            except:
+                pass  # Ignorar errores al cerrar
+            
+            # Crear NUEVA conexión en el hilo correcto
+            conn = sqlite3.connect(bd_destino)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=10000")
+            
+            # Determinar esquema final
+            if aplicar_cambios:
+                esquema_personalizado = esquema_resultado
+                self.callback_progreso(0.45, "✅ Aplicando correcciones de tipos...")
+            else:
+                esquema_personalizado = esquema_inicial
+                self.callback_progreso(0.45, "🔄 Usando detección automática...")
+
+            self.callback_progreso(0.5, "📋 Creando esquema de tabla...")
+            
+            # Crear tabla con esquema apropiado (usar esquema personalizado)
+            esquema = esquema_personalizado
+            sql_create = f"CREATE TABLE IF NOT EXISTS {nombre_tabla} (\n"
+            columnas_sql = []
+            for col_limpio, info in esquema.items():
+                columnas_sql.append(f"    {col_limpio} {info['tipo']}")
+            sql_create += ",\n".join(columnas_sql) + "\n)"
+            
+            conn.execute(f"DROP TABLE IF EXISTS {nombre_tabla}")
+            conn.execute(sql_create)
+            conn.commit()
+            
+            if self.cancelado:
+                conn.close()
+                return
+            
+            self.callback_progreso(0.6, "📊 Insertando datos...")
+            
+            # Preparar datos para inserción
+            datos_insercion = []
+            for _, fila in df_final.iterrows():
+                fila_limpia = []
+                for col_limpio, info in esquema.items():
+                    valor_original = fila[info['columna_original']]
+                    
+                    if pd.isna(valor_original):
+                        fila_limpia.append(None)
+                    else:
+                        fila_limpia.append(valor_original)
+                
+                datos_insercion.append(tuple(fila_limpia))
+                
+                if self.cancelado:
+                    conn.close()
+                    return
+            
+            # Insertar por lotes
+            columnas_limpias = list(esquema.keys())
+            placeholders = ", ".join(["?" for _ in columnas_limpias])
+            sql_insert = f"INSERT INTO {nombre_tabla} ({', '.join(columnas_limpias)}) VALUES ({placeholders})"
+            
+            # Procesar en lotes de 1000
+            chunk_size = 1000
+            total_filas = len(datos_insercion)
+            
+            for i in range(0, total_filas, chunk_size):
+                if self.cancelado:
+                    conn.close()
+                    return
+                
+                chunk = datos_insercion[i:i + chunk_size]
+                conn.executemany(sql_insert, chunk)
+                conn.commit()
+                
+                # Actualizar progreso
+                progreso = 0.6 + (0.3 * (i + len(chunk)) / total_filas)
+                self.callback_progreso(progreso, f"📊 Insertando: {i + len(chunk):,}/{total_filas:,} filas")
+            
+            conn.close()
+            
+            # Éxito
+            self.callback_completado(True, "Carga completada exitosamente", total_filas)
+            
+        except Exception as e:
+            if 'conn' in locals():
+                conn.close()
+            self.callback_completado(False, f"Error en carga: {str(e)}")
+    
     def cargar_preview(self, archivo):
         """Carga una vista previa del archivo con formato normalizado"""
         try:
@@ -199,44 +372,34 @@ class DataProcessor:
             
             # NUEVO: Corrección de tipos gráfica
             if correccion_modo == "grafica":
-                self.callback_progreso(0.35, "🎨 Preparando corrección gráfica de tipos...")
+                self.callback_progreso(0.35, "🎨 Abriendo ventana de corrección de tipos...")
                 
                 # Generar esquema inicial para corrección
                 esquema_inicial = self.obtener_esquema_tabla(df_original)
                 
                 # Importar y abrir ventana de corrección
                 try:
-                    from correccion_tipos import VentanaCorreccionTipos
-                    
-                    # Variable para resultado
-                    resultado_correccion = {'completado': False, 'esquema': esquema_inicial}
-                    
-                    def callback_correccion(aplicar_cambios, esquema_resultado):
-                        resultado_correccion['completado'] = True
-                        resultado_correccion['aplicar_cambios'] = aplicar_cambios
-                        resultado_correccion['esquema'] = esquema_resultado
-                    
-                    # Abrir ventana (esto debe ejecutarse en el hilo principal)
                     # La ventana se abrirá usando el callback configurado desde interface.py
                     if hasattr(self, 'callback_correccion_tipos') and self.callback_correccion_tipos:
-                        self.callback_correccion_tipos(df_original, esquema_inicial, callback_correccion)
+                        # CAMBIO CRÍTICO: No continuar aquí, delegar a la ventana
+                        self.callback_progreso(0.4, "⏸️ Esperando corrección de tipos...")
                         
-                        # Esperar resultado (simplificado)
-                        import time
-                        timeout = 300  # 5 minutos máximo
-                        elapsed = 0
-                        while not resultado_correccion['completado'] and elapsed < timeout:
-                            time.sleep(0.1)
-                            elapsed += 0.1
-                            if self.cancelado:
-                                conn.close()
-                                return
+                        # Preparar datos para continuar después
+                        self._datos_pendientes = {
+                            'df_original': df_original,
+                            'df_final': df_final,
+                            'bd_destino': bd_destino,
+                            'nombre_tabla': nombre_tabla,
+                            # NO incluir conn - se creará nueva en el otro hilo
+                            'esquema_inicial': esquema_inicial
+                        }
                         
-                        # Usar esquema corregido si se aplicaron cambios
-                        if resultado_correccion.get('aplicar_cambios', False):
-                            esquema_personalizado = resultado_correccion['esquema']
-                        else:
-                            esquema_personalizado = esquema_inicial
+                        # Abrir ventana Y PARAR AQUÍ
+                        self.callback_correccion_tipos(df_original, esquema_inicial, self._continuar_despues_correccion)
+                        
+                        # Cerrar conexión original ya que se creará nueva en el callback
+                        conn.close()
+                        return  # ← CRÍTICO: Parar aquí y esperar
                     else:
                         esquema_personalizado = self.obtener_esquema_tabla(df_original)
                         
