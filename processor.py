@@ -22,33 +22,36 @@ class DataProcessor:
         
         # Patrones para detectar columnas de fecha
         self.fecha_patterns = [
+            r'\bfecha\b', r'\bdate\b', r'\bfec\b', r'\bfech[a|.]', r'_dt', r'_date', r'_fecha',
             r'fecha', r'date', r'datetime', r'timestamp', 
             r'creado', r'actualizado', r'modificado',
             r'registro', r'ingreso', r'alta', r'baja'
         ]
     
     def detectar_columnas_fecha(self, df):
-        """Detecta automáticamente columnas que contienen fechas"""
+        """Detecta automáticamente columnas que contienen fechas con filtros más estrictos"""
         columnas_fecha = []
         
         for col in df.columns:
-            # Verificar por nombre de columna
             col_lower = str(col).lower()
-            es_fecha_por_nombre = any(re.search(pattern, col_lower) for pattern in self.fecha_patterns)
-            
-            # Verificar por tipo de datos
-            es_fecha_por_tipo = df[col].dtype in ['datetime64[ns]', 'datetime64', 'object']
-            
-            # Si parece fecha, intentar conversión
-            if es_fecha_por_nombre or es_fecha_por_tipo:
-                try:
-                    # Tomar muestra pequeña para verificar
-                    muestra = df[col].dropna().head(10)
-                    if len(muestra) > 0:
-                        pd.to_datetime(muestra, errors='raise')
-                        columnas_fecha.append(col)
-                except:
-                    continue
+            es_fecha_por_nombre = any(re.search(p, col_lower) for p in self.fecha_patterns)
+
+            # 🔒 Evitar tratar números como fecha salvo por nombre/patrón
+            if df[col].dtype.kind in 'iuf' and not es_fecha_por_nombre:
+                continue
+
+            # Trabajar con strings; usar indicadores visuales de fecha
+            muestra = df[col].dropna().astype(str).head(20)
+            candidatos = muestra[muestra.str.contains(r'[-/]', regex=True)]
+
+            if len(candidatos) == 0 and not es_fecha_por_nombre:
+                continue
+
+            try:
+                pd.to_datetime(candidatos if len(candidatos) else muestra, errors='raise')
+                columnas_fecha.append(col)
+            except Exception:
+                continue
         
         return columnas_fecha
     
@@ -96,6 +99,57 @@ class DataProcessor:
                 df_copy[col] = df_copy[col].where(pd.notna(df_copy[col]), None)
         
         return df_copy
+    
+    def aplicar_esquema_a_df(self, df_src, esquema):
+        """Aplica el esquema final a los valores del DataFrame original antes de insertar"""
+        df2 = df_src.copy()
+
+        def to_int_series(s):
+            # Quita separadores de miles y deja dígitos/signo
+            return pd.to_numeric(
+                s.astype(str).str.replace(r'[^\d\-]+', '', regex=True),
+                errors='coerce'
+            ).astype('Int64')
+
+        def to_real_series(s):
+            # Normaliza coma decimal -> punto, quita miles (.)
+            txt = s.astype(str).str.replace('.', '', regex=False)
+            txt = txt.str.replace(',', '.', regex=False)
+            return pd.to_numeric(txt, errors='coerce')
+
+        def to_bool_series(s):
+            m = s.astype(str).str.strip().str.lower()
+            return m.map({
+                '1':1,'true':1,'t':1,'yes':1,'si':1,'sí':1,'y':1,
+                '0':0,'false':0,'f':0,'no':0,'n':0
+            }).astype('Int64')
+
+        for col_limpio, info in esquema.items():
+            col = info.get('columna_original', col_limpio)
+            tipo = str(info['tipo']).upper()
+
+            if col not in df2.columns:
+                continue
+
+            if tipo == 'INTEGER':
+                df2[col] = to_int_series(df2[col])
+            elif tipo in ('REAL', 'NUMERIC', 'DECIMAL', 'FLOAT', 'DOUBLE'):
+                df2[col] = to_real_series(df2[col])
+            elif tipo in ('DATE', 'DATETIME') or info.get('es_fecha'):
+                dt = pd.to_datetime(df2[col], errors='coerce')
+                if tipo == 'DATETIME':
+                    df2[col] = dt.dt.strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    df2[col] = dt.dt.strftime('%Y-%m-%d')
+                df2[col] = df2[col].replace('NaT', None)
+            elif tipo == 'BOOLEAN':
+                df2[col] = to_bool_series(df2[col])
+            else:
+                # TEXT/BLOB: aseguramos None donde aplique
+                df2[col] = df2[col].where(pd.notna(df2[col]), None)
+
+        # Normalizar nulos con helper existente
+        return self.normalizar_nulos(df2)
     
     def obtener_esquema_tabla(self, df):
         """Genera esquema de tabla con tipos SQLite apropiados"""
@@ -260,9 +314,12 @@ class DataProcessor:
             
             self.callback_progreso(0.6, "📊 Insertando datos...")
             
+            # ✅ Reconstruir valores según el esquema elegido
+            df_para_insert = self.aplicar_esquema_a_df(df_original, esquema_personalizado)
+            
             # Preparar datos para inserción
             datos_insercion = []
-            for _, fila in df_final.iterrows():
+            for _, fila in df_para_insert.iterrows():
                 fila_limpia = []
                 for col_limpio, info in esquema.items():
                     valor_original = fila[info['columna_original']]
@@ -428,8 +485,11 @@ class DataProcessor:
             
             self.callback_progreso(0.5, f"📊 Cargando {len(df_final):,} filas...")
             
+            # ✅ Reconstruir valores según el esquema elegido
+            df_para_insert = self.aplicar_esquema_a_df(df_original, esquema_personalizado)
+            
             # Renombrar columnas para que coincidan con el esquema
-            df_para_cargar = df_final.copy()
+            df_para_cargar = df_para_insert.copy()
             mapeo_columnas = {info['columna_original']: col_limpio 
                             for col_limpio, info in esquema.items()}
             df_para_cargar = df_para_cargar.rename(columns=mapeo_columnas)
