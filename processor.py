@@ -50,8 +50,7 @@ class DataProcessor:
             try:
                 # Especificar formato para evitar advertencias de pandas
                 pd.to_datetime(candidatos if len(candidatos) else muestra, 
-                             errors='raise', 
-                             infer_datetime_format=True)
+                             errors='raise')
                 columnas_fecha.append(col)
             except Exception:
                 continue

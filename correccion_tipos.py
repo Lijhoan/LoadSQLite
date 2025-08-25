@@ -280,3 +280,16 @@ class VentanaCorreccionTipos:
         if respuesta:
             self.ventana.destroy()
             self.callback_resultado(False, self.esquema_inicial)
+    
+    def on_closing(self):
+        """Maneja el evento de cerrar ventana con X"""
+        respuesta = messagebox.askyesno(
+            "Cerrar Ventana", 
+            "¿Deseas cerrar la ventana de corrección de tipos?\n\n"
+            "• SÍ: Continuar con tipos detectados automáticamente\n"
+            "• NO: Mantener ventana abierta para hacer correcciones"
+        )
+        if respuesta:
+            self.ventana.destroy()
+            # Continuar con esquema automático (sin correcciones)
+            self.callback_resultado(False, self.esquema_inicial)
