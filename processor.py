@@ -114,10 +114,42 @@ class DataProcessor:
             ).astype('Int64')
 
         def to_real_series(s):
-            # Normaliza coma decimal -> punto, quita miles (.)
-            txt = s.astype(str).str.replace('.', '', regex=False)
-            txt = txt.str.replace(',', '.', regex=False)
-            return pd.to_numeric(txt, errors='coerce')
+            # Parser inteligente que conserva decimales originales
+            def parse_one(x):
+                t = str(x).strip()
+                if t == '' or t.lower() in {'nan', 'none', 'null'}:
+                    return None
+
+                has_dot = '.' in t
+                has_comma = ',' in t
+
+                # Solo punto → decimal US
+                if has_dot and not has_comma:
+                    # No tocar el punto decimal
+                    return pd.to_numeric(t, errors='coerce')
+
+                # Solo coma → decimal EU
+                if has_comma and not has_dot:
+                    # Cambiar coma por punto
+                    return pd.to_numeric(t.replace(',', '.'), errors='coerce')
+
+                if has_dot and has_comma:
+                    # Ambos presentes: el separador decimal suele ser el que aparece más a la derecha
+                    last_dot = t.rfind('.')
+                    last_comma = t.rfind(',')
+                    if last_dot > last_comma:
+                        # Punto = decimal, Coma = miles → eliminar comas
+                        t2 = t.replace(',', '')
+                        return pd.to_numeric(t2, errors='coerce')
+                    else:
+                        # Coma = decimal, Punto = miles → eliminar puntos y convertir coma a punto
+                        t2 = t.replace('.', '').replace(',', '.')
+                        return pd.to_numeric(t2, errors='coerce')
+
+                # Sin separadores: convertir directo
+                return pd.to_numeric(t, errors='coerce')
+
+            return s.map(parse_one)
 
         def to_bool_series(s):
             m = s.astype(str).str.strip().str.lower()
