@@ -1,4 +1,4 @@
-# Entorno virtual
+# Entornos virtuales
 .venv/
 env/
 venv/
@@ -17,7 +17,15 @@ __pycache__/
 *.sqlite
 *.sqlite3
 datos.db
+bd_ficheros.db
+
+# Archivos temporales de SQLite
+*.db-wal
+*.db-shm
 
 # Archivos de sistema
 .DS_Store
 Thumbs.db
+
+# Configuración de VS Code
+.vscode/
