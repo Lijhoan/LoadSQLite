@@ -29,6 +29,9 @@ class VentanaCorreccionTipos:
         self.ventana.transient(parent)
         self.ventana.grab_set()
         
+        # ✅ IMPORTANTE: Manejar cierre con X
+        self.ventana.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
         # Variables para dropdowns
         self.dropdown_vars = {}
         self.setup_ui()
